@@ -18,15 +18,21 @@ build/
 env/
 venv/
 
-# Data — never commit raw or processed data to a public repo
-data/raw/
-data/processed/
+# Data — exclude contents but keep folder structure visible on GitHub
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
 
-# Outputs — figures and tables are generated, not source
-outputs/
+# Outputs
+outputs/figures/*
+outputs/tables/*
+!outputs/figures/.gitkeep
+!outputs/tables/.gitkeep
 
-# Report PDF
-report/*.pdf
+# Report
+report/*
+!report/.gitkeep
 
 # OS
 .DS_Store
