@@ -21,3 +21,4 @@ tqdm>=4.66
 pytest>=7.4
 plotly>=5.20
 nbformat>=5.9
+kaleido>=0.2
