@@ -30,9 +30,13 @@ outputs/tables/*
 !outputs/figures/.gitkeep
 !outputs/tables/.gitkeep
 
-# Report
-report/*
-!report/.gitkeep
+# Report — track figures, exclude compiled PDF only
+report/*.pdf
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.synctex.gz
 
 # OS
 .DS_Store
