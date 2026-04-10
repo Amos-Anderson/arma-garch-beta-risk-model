@@ -109,19 +109,92 @@ def christoffersen_test(hit_sequence: np.ndarray) -> dict:
     }
 
 
-def anderson_darling(innovations: np.ndarray, cdf_func) -> float:
+def anderson_darling_pit(pit_values: np.ndarray) -> float:
     """
-    Anderson-Darling statistic with extra weight on tail accuracy.
-    AD² = n ∫ (F_empirical - F_model)² / (F(1-F)) dF
+    Anderson-Darling statistic on PIT values against Uniform(0,1).
+
+    Since the PIT values u_t = F_t(r_t) should be U[0,1] if the model
+    is correctly specified, the theoretical CDF is F(x) = x.
+    This simplifies the AD formula.
+
+    AD² = -n - (1/n) Σ (2i-1) [ln(u_i) + ln(1 - u_{n+1-i})]
 
     Parameters
     ----------
-    innovations : standardised residuals (1-D array)
-    cdf_func    : callable, takes array x, returns model CDF values
+    pit_values : 1-D array of PIT values in [0, 1]
 
     Returns
     -------
-    AD² statistic. Smaller = better tail fit.
+    AD² statistic. Smaller = better fit to Uniform(0,1).
+    """
+    u = np.sort(np.asarray(pit_values, dtype=float))
+    n = len(u)
+    u = np.clip(u, 1e-10, 1 - 1e-10)
+    i = np.arange(1, n + 1)
+
+    # For Uniform(0,1): CDF(u) = u, so log(CDF) = log(u)
+    ad = -n - np.mean(
+        (2 * i - 1) * (np.log(u) + np.log(1 - u[::-1]))
+    )
+    return float(ad)
+
+
+def pit_qq(pit_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    QQ plot data for PIT values against Uniform(0,1).
+
+    Following Kaufman (AMS 603, slide 37):
+        model_quantiles = sorted(F_t(r_t))
+        empirical_quantiles = (i+1) / (n+1)  for i = 0..n-1
+
+    If model is correct, points lie on the 45-degree line.
+
+    Parameters
+    ----------
+    pit_values : 1-D array of PIT values u_t = F_t(r_t)
+
+    Returns
+    -------
+    (empirical_quantiles, model_quantiles) — both 1-D arrays, sorted.
+    Plot empirical on x-axis, model on y-axis.
+    """
+    model_quantiles = np.sort(np.asarray(pit_values, dtype=float))
+    n = len(model_quantiles)
+    empirical_quantiles = np.array(
+        [(i + 1) / (n + 1) for i in range(n)]
+    )
+    return empirical_quantiles, model_quantiles
+
+
+def pit_ks_test(pit_values: np.ndarray) -> dict:
+    """
+    Kolmogorov-Smirnov test on PIT values against Uniform(0,1).
+
+    Following Kaufman (AMS 603, slide 42):
+        ks_stat, ks_p = scipy.stats.kstest(pit_values, 'uniform')
+
+    Parameters
+    ----------
+    pit_values : 1-D array of PIT values u_t = F_t(r_t)
+
+    Returns
+    -------
+    dict with keys: statistic, pvalue, pass (bool, p > 0.05)
+    """
+    pit = np.asarray(pit_values, dtype=float)
+    ks_stat, ks_p = stats.kstest(pit, 'uniform')
+    return {
+        "statistic": round(float(ks_stat), 4),
+        "pvalue":    round(float(ks_p), 4),
+        "pass":      ks_p > 0.05,
+    }
+
+
+# --- Legacy wrapper (backward compatibility) ---
+def anderson_darling(innovations: np.ndarray, cdf_func) -> float:
+    """
+    Anderson-Darling statistic (legacy interface).
+    For the corrected per-window model, use anderson_darling_pit() instead.
     """
     x   = np.sort(innovations)
     n   = len(x)

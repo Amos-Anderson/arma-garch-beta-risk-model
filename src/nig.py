@@ -86,8 +86,10 @@ def fit_nig_mle(innovations: np.ndarray) -> NIGParams:
     Uses method-of-moments for starting values then refines with
     Nelder-Mead (robust to non-smooth likelihood surfaces).
 
-    Returns NIGParams.
-    Raises RuntimeError if optimisation fails all attempts.
+    Returns (NIGParams, converged: bool).
+    If MLE fails all attempts, returns method-of-moments estimate
+    with converged=False instead of raising — this prevents the
+    rolling loop from crashing on difficult windows.
     """
     innovations = np.asarray(innovations, dtype=float)
     innovations = innovations[np.isfinite(innovations)]
@@ -110,6 +112,9 @@ def fit_nig_mle(innovations: np.ndarray) -> NIGParams:
         mu_init    = m1 - beta_init * delta_init / np.sqrt(alpha_init**2 - beta_init**2 + 1e-6)
     except Exception:
         alpha_init, beta_init, mu_init, delta_init = 2.0, 0.0, 0.0, 1.0
+
+    mom_fallback = NIGParams(alpha=alpha_init, beta=beta_init,
+                             mu=mu_init, delta=delta_init)
 
     x0 = np.array([alpha_init, beta_init, mu_init, delta_init])
 
@@ -142,10 +147,11 @@ def fit_nig_mle(innovations: np.ndarray) -> NIGParams:
             continue
 
     if best_result is None:
-        raise RuntimeError("NIG MLE failed to converge from all starting points.")
+        # Return MoM fallback — don't crash the rolling loop
+        return mom_fallback, False
 
     alpha, beta, mu, delta = best_result.x
-    return NIGParams(alpha=alpha, beta=beta, mu=mu, delta=delta)
+    return NIGParams(alpha=alpha, beta=beta, mu=mu, delta=delta), True
 
 
 def nig_quantile(p_level: float, params: NIGParams,
@@ -171,36 +177,47 @@ def nig_quantile(p_level: float, params: NIGParams,
     return result
 
 
-def compute_var(sigma_forecast: float, params: NIGParams,
-                level: float = 0.99) -> float:
+def compute_var(mu_forecast: float, sigma_forecast: float,
+                params: NIGParams, level: float = 0.99) -> float:
     """
     Next-day Value at Risk at confidence level `level`.
 
-    VaR_α = σ_forecast × Q_NIG(1 - level)
+    Following Kaufman (AMS 603, slide 33) affine transform:
+        r_{t+1} ~ NIG(params, mu_{t+1} + mu_NIG, sigma_{t+1} * delta_NIG)
+
+    VaR_α = μ_forecast + σ_forecast × Q_NIG(1 - α)
+
+    where Q_NIG already accounts for the NIG location parameter μ_NIG.
 
     Returns a negative number representing the loss threshold.
     E.g. VaR99 = -0.025 means there is a 1% chance of losing
     more than 2.5% tomorrow.
     """
     quantile = nig_quantile(1.0 - level, params)
-    return float(sigma_forecast * quantile)
+    return float(mu_forecast + sigma_forecast * quantile)
 
 
-def compute_cvar(sigma_forecast: float, params: NIGParams,
+def compute_cvar(mu_forecast: float, sigma_forecast: float,
+                 params: NIGParams,
                  level: float = 0.99, n_points: int = 500) -> float:
     """
     Conditional VaR (Expected Shortfall) at confidence level `level`.
-    CVaR = E[r | r < VaR_α]
-    Required by Basel III.
-    """
-    var = compute_var(sigma_forecast, params, level)
 
-    # Integrate E[r | r < VaR] numerically
-    lower = sigma_forecast * nig_quantile(1e-6, params)
+    CVaR = E[R | R < VaR_α]  where R = μ + σ·Z,  Z ~ NIG(params)
+
+    Computed by numerical integration over the affine-transformed
+    return distribution. Required by Basel III.
+    """
+    var = compute_var(mu_forecast, sigma_forecast, params, level)
+
+    # Integration bounds in return space
+    # Lower bound: map the NIG deep left tail to return space
+    lower = mu_forecast + sigma_forecast * nig_quantile(1e-6, params)
     grid  = np.linspace(lower, var, n_points)
 
-    # Unnormalised expectation below VaR
-    pdf_vals   = nig_pdf(grid / sigma_forecast, params) / sigma_forecast
+    # PDF of R = μ + σ·Z is  f_Z((r - μ)/σ) / σ
+    z_vals     = (grid - mu_forecast) / sigma_forecast
+    pdf_vals   = nig_pdf(z_vals, params) / sigma_forecast
     numerator  = np.trapezoid(grid * pdf_vals, grid)
     denominator = np.trapezoid(pdf_vals, grid)
 
