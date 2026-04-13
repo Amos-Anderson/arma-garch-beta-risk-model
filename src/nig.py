@@ -61,40 +61,41 @@ def nig_cdf(x: np.ndarray, p: NIGParams,
     return np.clip(results, 0.0, 1.0)
 
 
-def _nig_log_likelihood(params: np.ndarray,
-                        innovations: np.ndarray) -> float:
+def _nig_neg_loglik_nlopt(params, grad, innovations):
     """
-    Negative log-likelihood for NIG — minimised by the optimizer.
-    Returns large penalty value on invalid parameter combinations.
+    NIG negative log-likelihood in nlopt signature: f(params, grad).
+    nlopt requires grad argument even for derivative-free methods.
     """
     alpha, beta, mu, delta = params
 
-    # Hard constraints
-    if delta <= 0 or alpha <= 0 or abs(beta) >= alpha:
+    # nlopt enforces bounds, but guard edge cases numerically
+    if delta <= 1e-10 or alpha <= 1e-10 or abs(beta) >= alpha - 1e-10:
         return 1e10
 
     pdf_vals = nig_pdf(innovations, NIGParams(alpha, beta, mu, delta))
-
-    # Guard against zeros or negatives before log
     pdf_vals = np.where(pdf_vals > 1e-300, pdf_vals, 1e-300)
-    return -np.sum(np.log(pdf_vals))
+    return float(-np.sum(np.log(pdf_vals)))
 
 
-def fit_nig_mle(innovations: np.ndarray) -> NIGParams:
+def fit_nig_mle(innovations: np.ndarray):
     """
     Fit NIG parameters to standardised innovations via MLE.
-    Uses method-of-moments for starting values then refines with
-    Nelder-Mead (robust to non-smooth likelihood surfaces).
+
+    Following Kaufman (AMS 603, slide 32): uses nlopt with bounded
+    derivative-free optimisation (LN_BOBYQA, with LN_COBYLA fallback).
+    Constraints α > 0, δ > 0, |β| < α are enforced as explicit bounds.
+
+    Uses method-of-moments for starting values.
 
     Returns (NIGParams, converged: bool).
-    If MLE fails all attempts, returns method-of-moments estimate
-    with converged=False instead of raising — this prevents the
-    rolling loop from crashing on difficult windows.
+    If MLE fails, returns MoM estimate with converged=False.
     """
+    import nlopt
+
     innovations = np.asarray(innovations, dtype=float)
     innovations = innovations[np.isfinite(innovations)]
 
-    # Method-of-moments starting values
+    # --- Method-of-moments starting values ---
     m1   = np.mean(innovations)
     m2   = np.var(innovations)
     skew = stats.skew(innovations)
@@ -104,10 +105,9 @@ def fit_nig_mle(innovations: np.ndarray) -> NIGParams:
     kurt  = max(kurt, 0.1)
     skew2 = skew**2
 
-    # MoM estimates (from NIG moment formulas)
     try:
         beta_init  = np.sign(skew) * min(abs(skew) / (2 * np.sqrt(kurt / 3 + 1e-6)), 0.9)
-        alpha_init = max(np.sqrt(3 * kurt - 4 * skew2) / m2, 1.0)
+        alpha_init = max(np.sqrt(max(3 * kurt - 4 * skew2, 0.01)) / max(m2, 1e-6), 0.5)
         delta_init = max(m2 / np.sqrt(alpha_init**2 - beta_init**2 + 1e-6), 0.1)
         mu_init    = m1 - beta_init * delta_init / np.sqrt(alpha_init**2 - beta_init**2 + 1e-6)
     except Exception:
@@ -116,41 +116,82 @@ def fit_nig_mle(innovations: np.ndarray) -> NIGParams:
     mom_fallback = NIGParams(alpha=alpha_init, beta=beta_init,
                              mu=mu_init, delta=delta_init)
 
-    x0 = np.array([alpha_init, beta_init, mu_init, delta_init])
+    # --- nlopt bounds (Kaufman slide 32 pattern) ---
+    # params = [alpha, beta, mu, delta]
+    #   alpha ∈ [0.1, 100]
+    #   beta  ∈ [-alpha_max+0.01, alpha_max-0.01] ≈ [-99, 99]
+    #   mu    ∈ [-10, 10]
+    #   delta ∈ [0.01, 100]
+    num_variables = 4
+    lower_bounds = [0.1,  -99.0, -10.0, 0.01]
+    upper_bounds = [100.0, 99.0,  10.0, 100.0]
 
-    # Multiple starting points for robustness
-    starting_points = [
-        x0,
-        np.array([2.0,  0.0, 0.0, 1.0]),
-        np.array([5.0,  0.0, 0.0, 0.5]),
-        np.array([1.5, -0.1, 0.0, 1.0]),
+    initial_values = [
+        max(min(alpha_init, 99.0), 0.1),
+        max(min(beta_init, 98.0), -98.0),
+        max(min(mu_init, 9.0), -9.0),
+        max(min(delta_init, 99.0), 0.01),
     ]
 
-    best_result = None
+    # Objective: captures innovations via closure
+    def objective(params, grad):
+        return _nig_neg_loglik_nlopt(params, grad, innovations)
+
+    # --- Try LN_BOBYQA first, then LN_COBYLA as fallback ---
+    best_params = None
     best_val    = np.inf
 
-    for x_start in starting_points:
+    for algo in [nlopt.LN_BOBYQA, nlopt.LN_COBYLA]:
         try:
-            res = optimize.minimize(
-                _nig_log_likelihood,
-                x_start,
-                args=(innovations,),
-                method="Nelder-Mead",
-                options={"maxiter": 10000, "xatol": 1e-6, "fatol": 1e-6},
-            )
-            if res.success and res.fun < best_val:
-                alpha, beta, mu, delta = res.x
-                if delta > 0 and alpha > 0 and abs(beta) < alpha:
-                    best_val    = res.fun
-                    best_result = res
+            opt = nlopt.opt(algo, num_variables)
+            opt.set_lower_bounds(lower_bounds)
+            opt.set_upper_bounds(upper_bounds)
+            opt.set_min_objective(objective)
+            opt.set_xtol_abs(1e-6)
+            opt.set_ftol_abs(1e-6)
+            opt.set_maxeval(10000)
+
+            x = opt.optimize(initial_values)
+            val = opt.last_optimum_value()
+
+            alpha, beta, mu, delta = x
+            if val < best_val and delta > 0 and alpha > 0 and abs(beta) < alpha:
+                best_val = val
+                best_params = x
+                break  # LN_BOBYQA succeeded, no need for fallback
+
         except Exception:
             continue
 
-    if best_result is None:
-        # Return MoM fallback — don't crash the rolling loop
+    # --- Also try from a default starting point ---
+    if best_params is None or best_val > 1e9:
+        default_start = [2.0, 0.0, 0.0, 1.0]
+        for algo in [nlopt.LN_BOBYQA, nlopt.LN_COBYLA]:
+            try:
+                opt = nlopt.opt(algo, num_variables)
+                opt.set_lower_bounds(lower_bounds)
+                opt.set_upper_bounds(upper_bounds)
+                opt.set_min_objective(objective)
+                opt.set_xtol_abs(1e-6)
+                opt.set_ftol_abs(1e-6)
+                opt.set_maxeval(10000)
+
+                x = opt.optimize(default_start)
+                val = opt.last_optimum_value()
+
+                alpha, beta, mu, delta = x
+                if val < best_val and delta > 0 and alpha > 0 and abs(beta) < alpha:
+                    best_val = val
+                    best_params = x
+                    break
+
+            except Exception:
+                continue
+
+    if best_params is None:
         return mom_fallback, False
 
-    alpha, beta, mu, delta = best_result.x
+    alpha, beta, mu, delta = best_params
     return NIGParams(alpha=alpha, beta=beta, mu=mu, delta=delta), True
 
 
