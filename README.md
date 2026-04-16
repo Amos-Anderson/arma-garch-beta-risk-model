@@ -14,7 +14,7 @@ four-test statistical assessment suite.
 ## Report
 
 The full written project report is available as a compiled PDF:  
-[Download Report (PDF)](https://github.com/Amos-Anderson/arma-garch-beta-risk-model/releases/download/v1.0/ARMA_GARCH_Beta_Risk_Model.pdf)
+[Download Report (PDF)](https://github.com/user-attachments/files/26797474/ARMA_GARCH_Beta_Risk_Model.pdf)
 
 ---
 
