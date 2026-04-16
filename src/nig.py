@@ -116,21 +116,29 @@ def fit_nig_mle(innovations: np.ndarray):
     mom_fallback = NIGParams(alpha=alpha_init, beta=beta_init,
                              mu=mu_init, delta=delta_init)
 
-    # --- nlopt bounds (Kaufman slide 32 pattern) ---
+    # --- nlopt bounds (tightened for standardised innovations) ---
+    # The innovations have mean ≈ 0 and variance ≈ 1 by construction.
+    # NIG variance = α²·δ / γ³ where γ = √(α² − β²).
+    # For var ≈ 1, δ and α cannot both be large — they are identifiability-coupled.
+    # Restrict to economically plausible ranges to prevent degenerate solutions.
+    #
     # params = [alpha, beta, mu, delta]
-    #   alpha ∈ [0.1, 100]
-    #   beta  ∈ [-alpha_max+0.01, alpha_max-0.01] ≈ [-99, 99]
-    #   mu    ∈ [-10, 10]
-    #   delta ∈ [0.01, 100]
+    #   alpha ∈ [0.2, 20]   — controls tail heaviness; 20 is essentially Gaussian
+    #   beta  ∈ [-19.9, 19.9] — |β| < α is enforced by the likelihood penalty
+    #   mu    ∈ [-2, 2]     — location for standardised data is small
+    #   delta ∈ [0.1, 10]   — scale for standardised data is O(1)
     num_variables = 4
-    lower_bounds = [0.1,  -99.0, -10.0, 0.01]
-    upper_bounds = [100.0, 99.0,  10.0, 100.0]
+    lower_bounds = [0.2,  -19.9, -2.0, 0.1]
+    upper_bounds = [20.0,  19.9,  2.0, 10.0]
+
+    def clip(x, lo, hi):
+        return max(min(x, hi), lo)
 
     initial_values = [
-        max(min(alpha_init, 99.0), 0.1),
-        max(min(beta_init, 98.0), -98.0),
-        max(min(mu_init, 9.0), -9.0),
-        max(min(delta_init, 99.0), 0.01),
+        clip(alpha_init, 0.5, 19.0),
+        clip(beta_init, -18.0, 18.0),
+        clip(mu_init, -1.5, 1.5),
+        clip(delta_init, 0.2, 9.0),
     ]
 
     # Objective: captures innovations via closure
